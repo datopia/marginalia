@@ -78,7 +78,7 @@
 ;;  :codes [{:code-text "(def something \"hi\")"}]}
 ;; ...]</code></pre>
 ;;
-;; `docs-to-html` and `codes-to-html` convert their respective entries into html,
+;; `docs-to-html` and `code-to-html` convert their respective entries into html,
 ;; and `group-to-html` calls them on each seq item to do so.
 
 (defn docs-to-html
@@ -94,7 +94,7 @@
       str
       (md)))
 
-(defn codes-to-html [code-block]
+(defn code-to-html [code-block]
   (html [:pre {:class "brush: clojure"}
          (escape-html code-block)]))
 
@@ -105,7 +105,7 @@
                                  (:raw section)
                                  (:docstring section)))]
          [:td {:class "codes"} (if (= (:type section) :code)
-                                  (codes-to-html (:raw section))
+                                  (code-to-html (:raw section))
                                   "")]]))
 
 (defn dependencies-html [deps & header-name]
@@ -135,7 +135,7 @@
 ;; like this:
 ;;
 ;;     :marginalia {
-;;       :javascript 
+;;       :javascript
 ;;         ["http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"]}
 ;;
 ;; That way you won't have to download and carry around the MathJax library.
