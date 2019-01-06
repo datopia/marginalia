@@ -33,48 +33,28 @@
 ;;
 (ns marginalia.core
   (:require [clojure.java.io :as io]
-            [clojure.string  :as str])
-  (:use [marginalia
-         [html :only (uberdoc-html index-html single-page-html)]
-         [parser :only (parse-file
-                        parse-ns
-                        *lift-inline-comments*
-                        *delete-lifted-comments*)]]
-        [clojure.tools
-         [cli :only (cli)]]))
+            [clojure.string  :as str]
+            [marginalia.html :refer [uberdoc-html index-html single-page-html]]
+            [marginalia.parser :as parser
+             :refer [parse-file parse-ns]]
+            [clojure.tools.cli :refer [parse-opts]])
+  (:gen-class))
 
 
 (def ^{:dynamic true} *test* "src/marginalia/core.clj")
-(def ^{:dynamic true} *docs* "./docs")
 (def ^{:dynamic true} *comment* #"^\s*;;\s?")
 
 ;; ## File System Utilities
 
-(defn ls
-  "Performs roughly the same task as the UNIX `ls`.  That is, returns a seq of the filenames
-   at a given directory.  If a path to a file is supplied, then the seq contains only the
-   original path given."
-  [path]
-  (let [file (java.io.File. path)]
-    (if (.isDirectory file)
-      (seq (.list file))
-      (when (.exists file)
-        [path]))))
-
-(defn mkdir [path]
-  (.mkdirs (io/file path)))
-
-(defn ensure-directory!
-  "Ensure that the directory specified by `path` exists.  If not then make it so.
+(defn- ensure-directory!
+  "Ensure that the directory specified by `file` exists.  If not then make it so.
    Here is a snowman ☃"
-  [path]
-  (when-not (ls path)
-    (mkdir path)))
+  [file]
+  (when-not (.exists file)
+    (.mkdirs file)))
 
-(defn dir?
-  "Many Marginalia fns use dir? to recursively search a filepath."
-  [path]
-  (.isDirectory (java.io.File. path)))
+(defn- dir? [file]
+  (.isDirectory file))
 
 (defn find-file-extension
   "Returns a string containing the files extension."
@@ -93,10 +73,11 @@
   namespace."
   [dir pred]
   (->> (io/file dir)
-       (file-seq)
-       (filter (partial processable-file? pred))
-       (sort-by #(->> % parse-ns second))
-       (map #(.getCanonicalPath %))))
+       file-seq
+       (filter  (partial processable-file? pred))
+       (sort-by (comp second parse-ns))
+       (map     #(.getCanonicalPath %))
+       not-empty))
 
 ;; ## Project Info Parsing
 ;; Marginalia will parse info out of your project.clj to display in
@@ -114,87 +95,45 @@
   by merging into the name and version information the rest of the defproject
   forms (`:dependencies`, etc)"
   [[_ project-name version-number & attributes]]
-  (merge {:name (str project-name)
-	  :version version-number}
-	 (apply hash-map attributes)))
+  (merge {:name    (str project-name)
+          :version version-number}
+         (apply hash-map attributes)))
 
 (defn parse-project-file
   "Parses a project file -- './project.clj' by default -- and returns a map
    assembled according to the logic in parse-project-form."
-  ([] (parse-project-file "./project.clj"))
+  ([]
+   (parse-project-file "./project.clj"))
   ([path]
-      (try
-        (let [rdr (clojure.lang.LineNumberingPushbackReader.
-                    (java.io.FileReader.
-                     (java.io.File. path)))]
-          (loop [line (read rdr)]
-            (let [found-project? (= 'defproject (first line))]
-              (if found-project?
-                (parse-project-form line)
-                (recur (read rdr))))))
-	(catch Exception e
-          (throw (Exception.
-                  (str
-                   "There was a problem reading the project definition from "
-                   path)))))))
-
-
-;; ## Source File Analysis
-
-
-(defn end-of-block? [cur-group groups lines]
-  (let [line (first lines)
-        next-line (second lines)
-        next-line-code (get next-line :code-text "")]
-    (when (or (and (:code-text line)
-                   (:docs-text next-line))
-              (re-find #"^\(def" (str/trim next-line-code)))
-      true)))
-
-(defn merge-line [line m]
-  (cond
-   (:docstring-text line) (assoc m
-                            :docs
-                            (conj (get m :docs []) line))
-   (:code-text line)      (assoc m
-                            :codes
-                            (conj (get m :codes []) line))
-   (:docs-text line)      (assoc m
-                            :docs
-                            (conj (get m :docs []) line))))
-
-(defn group-lines [doc-lines]
-  (loop [cur-group {}
-         groups []
-         lines doc-lines]
-    (cond
-     (empty? lines) (conj groups cur-group)
-
-     (end-of-block? cur-group groups lines)
-     (recur (merge-line (first lines) {}) (conj groups cur-group) (rest lines))
-
-     :else (recur (merge-line (first lines) cur-group) groups (rest lines)))))
+   (try
+     (with-open [rdr (java.io.PushbackReader. (io/reader path))]
+       (loop [form (read rdr)]
+         (if (= 'defproject (first form))
+           (parse-project-form form)
+           (recur (read rdr)))))
+     (catch Exception e
+       nil))))
 
 (defn path-to-doc [fn]
-  {:ns     (parse-ns (java.io.File. fn))
+  {:ns     (parse-ns (io/file fn))
    :groups (parse-file fn)})
-
 
 ;; ## Output Generation
 
 (defn filename-contents
   [props output-dir all-files parsed-file]
-  {:name (io/file output-dir (str (:ns parsed-file) ".html"))
+  {:name     (io/file output-dir (str (:ns parsed-file) ".html"))
    :contents (single-page-html props parsed-file all-files)})
 
 (defn multidoc!
   [output-dir files-to-analyze props]
   (let [parsed-files (map path-to-doc files-to-analyze)
-        index (index-html props parsed-files)
-        pages (map #(filename-contents props output-dir parsed-files %) parsed-files)]
-    (doseq [f (conj pages {:name (io/file output-dir "toc.html")
+        index        (index-html props parsed-files)
+        pages        (for [f parsed-files]
+                       (filename-contents props output-dir parsed-files f))]
+    (doseq [f (conj pages {:name     (io/file output-dir "toc.html")
                            :contents index})]
-           (spit (:name f) (:contents f)))))
+      (spit (:name f) (:contents f)))))
 
 (defn uberdoc!
   "Generates an uberdoc html file from 3 pieces of information:
@@ -218,37 +157,100 @@
 
 (def ^:private file-extensions #{"clj" "cljs" "cljx" "cljc"})
 
-(defn format-sources
+(defn find-sources
   "Given a collection of filepaths, returns a lazy sequence of filepaths to all
    .clj, .cljs, .cljx, and .cljc files on those paths: directory paths will be searched
    recursively for files."
   [sources]
-  (if (nil? sources)
+  (if (empty? sources)
     (find-processable-file-paths "./src" file-extensions)
     (->> sources
          (mapcat #(if (dir? %)
                     (find-processable-file-paths % file-extensions)
-                    [(.getCanonicalPath (io/file %))])))))
+                    [(.getCanonicalPath (io/file %))]))
+         not-empty)))
 
-(defn split-deps [deps]
-  (when deps
-    (for [d (.split deps ";")
-          :let [[group artifact version] (.split d ":")]]
-      [(if (= group artifact) artifact (str group "/" artifact))
-       version])))
-
-(defn source-excluded?
+(defn- source-excluded?
   "Check if a source file is excluded from the generated documentation"
   [source opts]
-  (if-not (empty?
-           (filter #(if (re-find (re-pattern %) source)
-                      true
-                      false)
-                   (-> opts :marginalia :exclude)))
-    true
-    false))
+  (loop [exclusions (:exclude opts)]
+    (let [[h & exclusions] exclusions]
+      (cond (not h)                         false
+            (re-find (re-pattern h) source) true
+            :else                           (recur exclusions)))))
 
-(defn run-marginalia
+(defn- vec-assoc-fn [m k v]
+  (update m k (fnil conj []) v))
+
+(def ^:private cli-options
+  [["-d" "--dir"
+    "Directory into which the documentation will be written"
+    :default "./docs"]
+
+   ["-f" "--file"
+    "File into which the documentation will be written"
+    :default "uberdoc.html"]
+
+   ["-n" "--name NAME"
+    "Project name."]
+
+   ["-v" "--version VERSION"
+    "Project version."]
+
+   ["-D" "--desc DESCRIPTION"
+    "Project description."
+    :id :description]
+
+   ["-a" "--dep DEPEDENDENCY"
+    "Project dependency of the form <group>:<artifact>."
+    :assoc-fn vec-assoc-fn]
+
+   ["-c" "--css RESOURCE-OR-URI"
+    "Additional CSS resource name or external URI."
+    :assoc-fn vec-assoc-fn]
+
+   ["-j" "--js RESOURCE-OR-URI"
+    "Additional JS resources name or external URI."
+    :assoc-fn vec-assoc-fn
+    :id       :javascript]
+
+   ["-m" "--multi"
+    "Generate each namespace documentation as a separate file"
+    :id :multi?]
+
+   ["-e" "--exclude SOURCE-FILE"
+    "Exclude source file(s) from the document generation process."
+    :assoc-fn vec-assoc-fn]
+
+   ["-L" "--lift-inline-comments"
+    "Lift comments to the top of the enclosing form. They will be
+    treated as if they preceded the enclosing form."
+    :default true
+    :id      :lift-inline?]
+
+   ["-X" "--exclude-lifted-comments"
+    "If comments are being lifted into documentation then also exclude
+     them from the source code display."
+    :default true
+    :id      :exclude-lifted?]
+
+   ["-h" "--help"
+    :id :help?]])
+
+(def ^:private usage-preamble        "Options:\n")
+(def ^:private arg-mismatch-preamble "Wrong number of arguments passed to Marginalia.\n")
+
+(defn- exclude-sources [sources opts]
+  (for [s sources :when (not (source-excluded? s opts))]
+    s))
+
+(let [proj-keys #{:name :version :description :dependencies}]
+  (defn- merge-opts [opts proj]
+    (-> proj
+        (merge (select-keys opts proj-keys))
+        (update :marginalia merge opts))))
+
+(defn -main
   "Default generation: given a collection of filepaths in a project, find the .clj
    files at these paths and, if Clojure source files are found:
 
@@ -258,67 +260,19 @@
      using the found source files and a project file expected to be in its default location.
 
    If no source files are found, complain with a usage message."
-  [args & [project]]
-  (let [[{:keys [dir file name version desc deps css js multi
-                 leiningen exclude
-                 lift-inline-comments exclude-lifted-comments]} files help]
-        (cli args
-             ["-d" "--dir" "Directory into which the documentation will be written" :default "./docs"]
-             ["-f" "--file" "File into which the documentation will be written" :default "uberdoc.html"]
-             ["-n" "--name" "Project name - if not given will be taken from project.clj"]
-             ["-v" "--version" "Project version - if not given will be taken from project.clj"]
-             ["-D" "--desc" "Project description - if not given will be taken from project.clj"]
-             ["-a" "--deps" "Project dependencies in the form <group1>:<artifact1>:<version1>;<group2>...
-                 If not given will be taken from project.clj"]
-             ["-c" "--css" "Additional css resources <resource1>;<resource2>;...
-                 If not given will be taken from project.clj."]
-             ["-j" "--js" "Additional javascript resources <resource1>;<resource2>;...
-                 If not given will be taken from project.clj"]
-             ["-m" "--multi" "Generate each namespace documentation as a separate file" :flag true]
-             ["-l" "--leiningen" "Generate the documentation for a Leiningen project file."]
-             ["-e" "--exclude" "Exclude source file(s) from the document generation process <file1>;<file2>;...
-                 If not given will be taken from project.clj"]
-             ["-L" "--lift-inline-comments" "Lift ;; inline comments to the top of the enclosing form.
-                 They will be treated as if they preceded the enclosing form." :flag true]
-             ["-X" "--exclude-lifted-comments" "If ;; inline comments are being lifted into documentation
-                 then also exclude them from the source code display." :flag true])
-        sources (distinct (format-sources (seq files)))
-        sources (if leiningen (cons leiningen sources) sources)]
-    (if-not sources
-      (do
-        (println "Wrong number of arguments passed to Marginalia.")
-        (println help))
-      (binding [*docs* dir
-                *lift-inline-comments* lift-inline-comments
-                *delete-lifted-comments* exclude-lifted-comments]
-        (let [project-clj (or project
-                              (when (.exists (io/file "project.clj"))
-                                (parse-project-file)))
-              choose #(or %1 %2)
-              marg-opts (merge-with choose
-                                    {:css (when css (.split css ";"))
-                                     :javascript (when js (.split js ";"))
-                                     :exclude (when exclude (.split exclude ";"))
-                                     :leiningen leiningen}
-                                    (:marginalia project-clj))
-              opts (merge-with choose
-                               {:name name
-                                :version version
-                                :description desc
-                                :dependencies (split-deps deps)
-                                :multi multi
-                                :marginalia marg-opts}
-                               project-clj)
-              sources (->> sources
-                           (filter #(not (source-excluded? % opts)))
-                           (into []))]
-          (println "Generating Marginalia documentation for the following source files:")
-          (doseq [s sources]
-            (println "  " s))
-          (println)
-          (ensure-directory! *docs*)
-          (if multi
-            (multidoc! *docs* sources opts)
-            (uberdoc!  (str *docs* "/" file) sources opts))
-          (println "Done generating your documentation in" *docs*)
-          (println ""))))))
+  [& args]
+  (let [parsed (parse-opts args cli-options)
+        opts   (:options parsed)]
+    (if (:help? opts)
+      (println (str usage-preamble (:summary parsed)))
+      (if-let [sources (find-sources (:arguments parsed))]
+        (let [proj    (merge-opts opts (parse-project-file))
+              opts    (:marginalia proj)
+              sources (into [] (exclude-sources sources opts))]
+          (ensure-directory! (:dir opts))
+          (binding [parser/*lift-inline-comments*   (:lift-inline?    opts)
+                    parser/*delete-lifted-comments* (:exclude-inline? opts)]
+            (if (:multi? opts)
+              (multidoc! (:dir opts)                sources proj)
+              (uberdoc!  (str (:dir opts) "/" file) sources proj))))
+        (println (str arg-mismatch-preamble (:summary parsed)))))))
